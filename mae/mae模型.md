@@ -1,5 +1,5 @@
 # [论文解读] Masked Autoencoders Are Scalable Vision Learners（MAE）​
-论文地址：<arXiv:2111.06377v3>   
+论文地址：<https://arxiv.org/abs/2111.06377>   
 核心作者：Kaiming He（FAIR）等  
 领域：计算机视觉-自监督学习  
 关键词：掩码自编码、Vision Transformer、可扩展预训练  
