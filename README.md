@@ -1,4 +1,21 @@
-# 个人阅读总结知识思维导图
+﻿# 学术论文精读笔记
 
-通过网盘分享的文件：论文 - 副本.mmap等2个文件
-链接: https://pan.baidu.com/s/1ub7KT6VgxQRAhgzZ0yBpqg?pwd=3tzi 提取码: 3tzi
+这是一个用于整理人工智能与机器学习相关论文阅读笔记的仓库，主要记录我在学习过程中的论文解读、知识梳理、配图整理，以及少量代码与 Notebook 实践内容。仓库会持续补充新的阅读主题，逐步沉淀成一个可检索、可扩展的个人学习资料库。
+
+## 学习资料
+
+- 思维导图与补充资料：<https://pan.baidu.com/s/1ub7KT6VgxQRAhgzZ0yBpqg?pwd=3tzi>
+- 提取码：`3tzi`
+
+## 内容目录
+
+| 主题 | 方向 | 说明 | 路径 |
+| --- | --- | --- | --- |
+| DINOv2 | 计算机视觉 / 自监督学习 | 论文精读笔记与配图整理 | `DINO模型/` |
+| LLaVA | 多模态大模型 | Visual Instruction Tuning 相关论文解读 | `LLaVA模型/` |
+| MAE | 计算机视觉 / 自监督学习 | MAE 模型论文解读与配图 | `mae/` |
+| RAG | 大模型应用 / 检索增强生成 | RAG 基础概念与综述类内容整理 | `RAG/` |
+| SAM | 计算机视觉 / 图像分割 | SAM 模型论文解读与示意图 | `sam/` |
+| TurboQuant | 模型压缩 / 量化 | TurboQuant 相关资料、Notebook 与代码 | `TurboQuant_GOOGLE/` |
+
+后续新增内容时，可以直接在上表中继续补充条目，保持仓库结构和入口信息一致。
