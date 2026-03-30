@@ -1,8 +1,13 @@
 #向量数据库的压缩存储
 import numpy as np
-from scipy.stats import norm
-from scipy.optimize import minimize_scalar
 import math
+import torch
+
+
+def normal_ppf(quantiles):
+    quantiles = torch.as_tensor(quantiles, dtype=torch.float64)
+    values = torch.sqrt(torch.tensor(2.0, dtype=torch.float64)) * torch.erfinv(2 * quantiles - 1)
+    return values.cpu().numpy()
 
 class TurboQuant:
     def __init__(self, d, b, use_prod=True):
@@ -46,20 +51,20 @@ class TurboQuant:
             # 3-bit 需要求解 Lloyd-Max，这里使用近似值 (可自行数值优化)
             # 我们先用 8 个等距分位数近似，实际应用可预计算
             quantiles = np.linspace(0, 1, 2**b + 1)
-            points = norm.ppf(quantiles[1:-1])
+            points = normal_ppf(quantiles[1:-1])
             # 调整使码本中心对称
             points = (points - np.mean(points)) / np.std(points) * self.scale
             return points
         elif b == 4:
             quantiles = np.linspace(0, 1, 2**b + 1)
-            points = norm.ppf(quantiles[1:-1])
+            points = normal_ppf(quantiles[1:-1])
             points = (points - np.mean(points)) / np.std(points) * self.scale
             return points
         else:
             # 对于 b>4，使用均匀量化近似，也可以使用 Panter-Dite 公式生成
             # 这里简单用标准正态分位数
             quantiles = np.linspace(0, 1, 2**b + 1)
-            points = norm.ppf(quantiles[1:-1])
+            points = normal_ppf(quantiles[1:-1])
             points = (points - np.mean(points)) / np.std(points) * self.scale
             return points
 
