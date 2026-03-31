@@ -112,8 +112,17 @@ class Qwen3Config(PretrainedConfig):
     pad_token_id: int | None = None
     bos_token_id: int | None = None
     eos_token_id: int | list[int] | None = None
-    use_turboquant: bool = False      # 是否启用 TurboQuant
-    turboquant_bits: int = 3          # 每坐标比特数（例如 2,3,4）
+    # 是否启用 TurboQuant KV cache。
+    # 启用后，attention 不再走标准浮点 KV 路径，而是切换到
+    # “TurboQuant_mse + QJL residual” 的压缩域 attention。
+    use_turboquant: bool = False
+    # TurboQuant 的总 bit-width b。
+    # 根据论文 Algorithm 2，实际会拆成：
+    #   - b-1 bit 给 TurboQuant_mse
+    #   - 1 bit 给 QJL residual
+    turboquant_bits: int = 3
+    # 压缩域 attention 的 block 大小。block 越大，吞吐通常更好；
+    # 但中间张量也会更大，峰值显存可能上升。
     turboquant_block_size: int = 256
 
     def __post_init__(self, **kwargs):
