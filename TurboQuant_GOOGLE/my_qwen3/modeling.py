@@ -52,19 +52,42 @@ def normal_ppf(quantiles):
     return (torch.sqrt(torch.tensor(2.0, dtype=torch.float64)) * torch.erfinv(2 * quantiles - 1)).cpu().numpy()
 
 
-#定义一个新的 TurboQuantCache 类，继承自 DynamicCache，并重写 update 方法以适应 TurboQuant 的需求
+# TurboQuantCache 对应论文中的在线缓存量化器。
+# 论文里真正用于内积保持的是 TurboQuant_prod（Algorithm 2），
+# 即每个向量最终保存三部分：
+#   1) Qmse 的索引 idx      -> 对应 Algorithm 2 的 idx / Qmse(x)
+#   2) 残差的 QJL 符号 qjl  -> 对应 Algorithm 2 的 qjl
+#   3) 残差范数 gamma       -> 对应 Algorithm 2 的 ||r||_2
+#
+# 这里我们把 K/V cache 直接存成这三部分，而不是保留完整的浮点 K/V。
+# 后续 attention 直接从压缩表示估计 q·k，并对 v 做压缩域聚合。
 class TurboQuantCache(DynamicCache):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.bits = config.turboquant_bits
+        # 根据论文 Algorithm 2，总 bit-width b 被拆成：
+        #   - b-1 bit: TurboQuant_mse
+        #   - 1 bit  : QJL on residual
+        # 因此缓存里用于标量量化索引的实际 bit 数是 b-1。
         self.mse_bits = max(self.bits - 1, 0)
         self.head_dim = config.head_dim
         self.index_mask = (1 << self.mse_bits) - 1 if self.mse_bits > 0 else 0
         self.packed_dim = (self.head_dim * self.mse_bits + 7) // 8 if self.mse_bits > 0 else 0
         self.qjl_packed_dim = (self.head_dim + 7) // 8
+        # QJL 的逆映射里会出现 sqrt(pi/2) / d，这里提前缓存常数。
+        # 对应论文 Definition 1 中：
+        #   Q_qjl^{-1}(z) = sqrt(pi/2) / d * S^T z
         self.qjl_scale = math.sqrt(math.pi / 2.0) / self.head_dim
 
+        # K/V 分别维护四部分：
+        #   mse_cache   : Qmse 的压缩索引 idx
+        #   qjl_cache   : 残差的 1-bit 符号
+        #   gamma_cache : 残差范数 ||r||_2
+        #   norm_cache  : 原始向量范数
+        #
+        # 论文默认分析对象位于单位球上。工程里真实 K/V 并非单位范数，
+        # 因此这里单独存一份 norm，把向量拆成 “norm * unit_vector” 的形式。
         self.key_mse_cache = [None] * config.num_hidden_layers
         self.key_qjl_cache = [None] * config.num_hidden_layers
         self.key_gamma_cache = [None] * config.num_hidden_layers
@@ -79,12 +102,16 @@ class TurboQuantCache(DynamicCache):
         self.layer_proj_mats = [None] * config.num_hidden_layers
 
     def set_layer_params(self, layer_idx, rot_mat, codebook, proj_mat):
+        # 每一层 attention 自己维护一套 TurboQuant 参数：
+        #   Π: 随机正交旋转
+        #   codebook: TurboQuant_mse 的标量量化码本
+        #   S: QJL 投影矩阵
         self.layer_rot_mats[layer_idx] = rot_mat
         self.layer_codebooks[layer_idx] = codebook
         self.layer_proj_mats[layer_idx] = proj_mat
 
     def _quantize(self, x, codebook):
-        """x: [..., head_dim] 浮点张量，返回整数索引"""
+        """对旋转域坐标做逐坐标标量量化，等价于论文 Algorithm 1 的 Quantmse。"""
         if self.mse_bits == 0:
             return None
         x_flat = x.reshape(-1, 1)
@@ -95,9 +122,11 @@ class TurboQuantCache(DynamicCache):
     def _dequantize(self, idx, codebook):
         if idx is None:
             raise ValueError("MSE indices are not available when turboquant_bits=1.")
+        # 这里只用于构造“残差 r”，不是为了把整段历史 K/V 恢复成普通缓存。
         return codebook.to(idx.device)[idx.to(torch.long)]
 
     def _pack_indices(self, idx):
+        # 工程上把 Qmse 的整数索引做 bit-pack，减少缓存常驻显存。
         if idx is None:
             return None
         original_shape = idx.shape[:-1]
@@ -115,6 +144,8 @@ class TurboQuantCache(DynamicCache):
         return packed.reshape(*original_shape, self.packed_dim)
 
     def _unpack_indices(self, packed):
+        # 运行 attention 时临时从 bit-packed 索引恢复出 “每个坐标属于哪个 codeword”。
+        # 注意这里只恢复整数索引，不是恢复整段浮点 K/V。
         if packed is None:
             return None
         original_shape = packed.shape[:-1]
@@ -135,6 +166,7 @@ class TurboQuantCache(DynamicCache):
         return values.to(torch.long).reshape(*original_shape, self.head_dim)
 
     def _pack_signs(self, signs):
+        # QJL 只有 1-bit 符号，因此天然适合压成 bit-packed 布局。
         original_shape = signs.shape[:-1]
         flat = (signs > 0).reshape(-1, signs.shape[-1]).to(torch.uint8)
         packed = torch.zeros((flat.shape[0], self.qjl_packed_dim), dtype=torch.uint8, device=signs.device)
@@ -145,6 +177,8 @@ class TurboQuantCache(DynamicCache):
         return packed.reshape(*original_shape, self.qjl_packed_dim)
 
     def _unpack_signs(self, packed, dtype):
+        # 从 bit-packed QJL 符号恢复到 {-1, +1}。
+        # 这一步对应论文里 qjl = sign(S r) 的读取。
         original_shape = packed.shape[:-1]
         flat = packed.reshape(-1, packed.shape[-1]).to(torch.int32)
         cols = torch.arange(self.head_dim, device=packed.device, dtype=torch.int32)
@@ -167,6 +201,8 @@ class TurboQuantCache(DynamicCache):
            rot_mat: [num_heads, head_dim, head_dim]
            当 inverse=False 时应用旋转，否则应用逆旋转
         """
+        # 对应论文中先乘随机正交矩阵 Π，使坐标更接近独立同分布，
+        # 从而可以逐坐标使用标量量化码本。
         # 处理输入形状
         if x.dim() == 4:  # [batch, heads, seq_len, head_dim]
             # 将 seq_len 维度移到前面，方便批量处理
@@ -191,6 +227,7 @@ class TurboQuantCache(DynamicCache):
         """
         key_states, value_states: [batch, num_kv_heads, seq_len, head_dim]
         """
+        # 这里不保存原始浮点 K/V，而是把新到达的 token 直接转成 TurboQuant_prod 表示。
         rot_mat = self.layer_rot_mats[layer_idx]
         codebook = self.layer_codebooks[layer_idx]
         proj_mat = self.layer_proj_mats[layer_idx]
@@ -201,15 +238,30 @@ class TurboQuantCache(DynamicCache):
         return None, None
 
     def _quantize_and_store(self, states, layer_idx, rot_mat, codebook, proj_mat, is_key):
+        # 为了把论文中“x ∈ S^{d-1}”的分析落到真实 K/V 上，
+        # 我们先把向量分解为 norm * unit_vector。
         norms = states.norm(dim=-1, keepdim=True).clamp_min(1e-6)
         unit_states = states / norms
+
+        # Step 1: 乘随机正交矩阵 Π，把单位向量送到旋转域。
+        # 对应论文 Algorithm 1 第 5 行：y <- Π · x
         rotated_states = self._rotate(unit_states, rot_mat, inverse=False)
 
+        # Step 2: 做 b-1 bit 的 TurboQuant_mse，得到 idx。
+        # 对应论文 Algorithm 2 第 5 行：idx <- Quantmse(x)
         idx = self._quantize(rotated_states, codebook)
+
+        # 这里临时恢复 x_mse，只是为了计算残差 r。
+        # 对应论文 Algorithm 2 第 6 行：r <- x - DeQuantmse(idx)
         mse_hat_rot = self._dequantize(idx, codebook) if self.mse_bits > 0 else torch.zeros_like(rotated_states)
         mse_hat = self._rotate(mse_hat_rot, rot_mat, inverse=True)
 
         residual = unit_states - mse_hat
+
+        # Step 3: 对残差做 QJL，并记录残差范数 gamma。
+        # 对应论文 Algorithm 2 第 7-8 行：
+        #   qjl <- sign(S · r)
+        #   output: (idx, qjl, ||r||_2)
         gamma = residual.norm(dim=-1, keepdim=True)
         residual_unit = residual / gamma.clamp_min(1e-6)
         qjl_projection = torch.einsum("bhsd,hde->bhse", residual_unit, proj_mat.to(states.dtype))
@@ -226,6 +278,9 @@ class TurboQuantCache(DynamicCache):
         self._append_cache(norm_cache, layer_idx, norms.to(torch.float16))
 
     def get_prod_block(self, layer_idx, start, end, dtype=None):
+        # 读取一个 block 的压缩表示。
+        # 这里故意只返回压缩域元素（idx/sign/gamma/norm），
+        # 不返回完整浮点 K/V，避免退化成“整段反量化再 attention”的错误路径。
         if dtype is None:
             dtype = torch.float16
 
@@ -441,9 +496,19 @@ def turboquant_attention_forward(
     attention_mask: torch.Tensor | None,
     scaling: float,
 ):
+    # 这是 TurboQuant 的核心 attention 路径：
+    #   - K 侧：直接从 (idx, qjl, gamma, norm) 估计 q·k
+    #   - V 侧：直接从压缩表示做加权聚合
+    #   - 不把整段历史 K/V 恢复成普通浮点缓存
+    #
+    # 其思想对应论文 Theorem 2 / Algorithm 2：
+    #   <q, x_hat> = <q, x_mse> + gamma * <q, x_qjl>
     block_size = getattr(module, "turboquant_block_size", 256)
     total_seq_len = cache.get_seq_length(layer_idx)
 
+    # 把 query 同时映射到：
+    #   1) 旋转域   -> 用于 MSE 项
+    #   2) QJL 投影域 -> 用于残差 QJL 项
     rot_mats = module.rot_mat.repeat_interleave(module.num_key_value_groups, dim=0).to(query.device)
     proj_mats = module.proj_mat.repeat_interleave(module.num_key_value_groups, dim=0).to(query.device)
     query_rot = torch.einsum("bhqd,hde->bhqe", query, rot_mats)
@@ -464,6 +529,10 @@ def turboquant_attention_forward(
     for start in range(0, total_seq_len, block_size):
         end = min(start + block_size, total_seq_len)
         block = cache.get_prod_block(layer_idx, start, end, dtype=query.dtype)
+
+        # 从缓存中取出 K/V 对应 block 的压缩表示。
+        # key_norms * key_gamma * key_signs
+        #   -> 对应论文里的 gamma * Q_qjl(r)
         key_norms = repeat_kv(block["key_norms"], module.num_key_value_groups)
         key_residual = repeat_kv(block["key_norms"] * block["key_gamma"] * block["key_signs"], module.num_key_value_groups)
         value_norms = repeat_kv(block["value_norms"], module.num_key_value_groups)
@@ -471,18 +540,25 @@ def turboquant_attention_forward(
             block["value_norms"] * block["value_gamma"] * block["value_signs"], module.num_key_value_groups
         )
 
+        # QJL 项：q 与残差估计项的内积。
+        # 对应论文 Definition 1 / Lemma 4 / Theorem 2 中的无偏残差估计。
         qjl_logits = qjl_scale * torch.matmul(query_proj, key_residual.transpose(2, 3))
         mse_logits = torch.zeros_like(qjl_logits)
         key_idx = repeat_kv(block["key_idx"], module.num_key_value_groups) if block["key_idx"] is not None else None
         value_idx = repeat_kv(block["value_idx"], module.num_key_value_groups) if block["value_idx"] is not None else None
         if key_idx is not None:
+            # MSE 项：通过 codebook[idx] 直接得到旋转域坐标的代表值，
+            # 然后与 query_rot 做内积。
+            # 这对应论文里 <q, x_mse> 这一部分。
             key_centroids = module.codebook.to(query.dtype)[key_idx]
             mse_logits = torch.matmul(query_rot, (key_norms * key_centroids).transpose(2, 3))
 
+        # 总的 attention logits = MSE 项 + QJL 残差项。
         logits = (mse_logits + qjl_logits) * scaling
         if attention_mask is not None:
             logits = logits + attention_mask[..., start:end]
 
+        # 采用 online softmax，避免长序列下显式保存整个 logits 矩阵。
         logits_fp32 = logits.to(torch.float32)
         block_max = logits_fp32.max(dim=-1, keepdim=True).values
         new_max = torch.maximum(running_max, block_max)
@@ -490,6 +566,9 @@ def turboquant_attention_forward(
         old_scale = torch.exp(running_max - new_max)
         block_scale = torch.exp(logits_fp32 - new_max)
 
+        # V 侧的聚合与 K 侧完全对称：
+        #   softmax 权重先乘 MSE 项，再乘 QJL 项，
+        #   最后映射回原始空间。
         block_mse = torch.zeros_like(torch.matmul(block_scale.to(query.dtype), value_residual))
         if value_idx is not None:
             value_centroids = module.codebook.to(query.dtype)[value_idx]
@@ -538,7 +617,10 @@ class Qwen3Attention(nn.Module):
         self.k_norm = Qwen3RMSNorm(self.head_dim, eps=config.rms_norm_eps)  # thus post q_norm does not need reshape
         self.sliding_window = config.sliding_window if self.layer_type == "sliding_attention" else None
 
-        #如果配置启用 TurboQuant，则设置相关参数并预生成旋转矩阵和码本
+        # TurboQuant 相关参数。
+        # rot_mat  -> 论文里的随机正交矩阵 Π
+        # proj_mat -> 论文里的 QJL 投影矩阵 S
+        # codebook -> TurboQuant_mse 的标量量化码本
         self.use_turboquant = getattr(config, 'use_turboquant', False)
         if self.use_turboquant:
             self.bits = config.turboquant_bits
@@ -567,7 +649,8 @@ class Qwen3Attention(nn.Module):
         variance = 1.0 / self.head_dim
         std = math.sqrt(variance)
 
-        # 预定义已知的最优码本（对于标准正态分布，方差1）
+        # 这里的码本对应论文 Algorithm 1 / Eq. (4) 的标量量化中心。
+        # 工程上直接使用论文给出的低 bit 近似中心，避免每次在线求解 Lloyd-Max。
         if b == 1:
             centers_std = np.array([-math.sqrt(2.0 / math.pi), math.sqrt(2.0 / math.pi)])
         elif b == 2:
@@ -612,9 +695,12 @@ class Qwen3Attention(nn.Module):
 
         if past_key_values is not None:
             if isinstance(past_key_values, TurboQuantCache) and self.use_turboquant:
-                # 确保该层的旋转矩阵和码本已设置
+                # 首次进入该层时，把本层 TurboQuant 参数注册到 cache。
                 if past_key_values.layer_rot_mats[self.layer_idx] is None:
                     past_key_values.set_layer_params(self.layer_idx, self.rot_mat, self.codebook, self.proj_mat)
+
+                # 先把当前 token 的 K/V 压入 TurboQuant cache，
+                # 再直接走压缩域 attention。
                 past_key_values.update(key_states, value_states, self.layer_idx)
                 attn_output, attn_weights = turboquant_attention_forward(
                     self,
