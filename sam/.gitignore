@@ -1,0 +1,17 @@
+# 官方源码副本只作为本地对照，不提交到本仓库
+sam2_impl/
+
+# 权重文件超过 GitHub 普通文件大小限制，使用脚本本地生成
+sam2_from_scratch/*.pth
+sam2_from_scratch/*.pt
+**/checkpoints/*.pt
+**/checkpoints/*.pth
+
+# Python 缓存
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# 图像测试输出，按需本地重新生成
+sam2_from_scratch/result_*.png
+
