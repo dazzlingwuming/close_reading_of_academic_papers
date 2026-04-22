@@ -172,25 +172,9 @@ best_mask = masks[best_idx] > 0.0
 | Model Wrapper | `sam2fs/model.py` | 串联 image encoder、memory attention、prompt encoder、mask decoder、memory encoder |
 | Image Predictor | `sam2fs/predictor.py` | 图像预处理、prompt 坐标变换、box prompt 合并、mask 后处理 |
 
-## 与官方结果的对齐检查
+## 与官方结果的对齐结果
 
-仓库上一级目录提供了两个对比脚本：
-
-```bash
-cd ..
-python compare_intermediate_features.py
-python compare_image_2_results.py
-```
-
-`compare_intermediate_features.py` 会逐层比较：
-
-- Hiera trunk
-- FPN neck
-- prompt encoder
-- high-res feature projection
-- mask decoder token、upscaled feature、hypernetwork、mask logits、IoU head
-
-当前同条件单图测试中，复现结构和官方实现的输出结果：
+当前同条件单图测试中，复现结构和 SAM2.1 tiny 官方实现的输出结果：
 
 ```text
 mask IoU between two outputs: 0.9994
@@ -207,4 +191,3 @@ result_image_2_fs_mask.png
 result_image_2_fs_cutout.png
 __pycache__/
 ```
-
