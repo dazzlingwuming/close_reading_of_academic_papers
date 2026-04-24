@@ -43,7 +43,7 @@ SAM 3 更像：
 ---  
   
 ## 2. SAM 3 总体结构：detector + tracker  
-![SAM3 总体结构](../md图片/sam3-overview.png)
+![SAM3 总体结构](md图片/sam3-overview.png)
 SAM 3 的模型不能再被理解成“一个更强的 SAM 2”。  
   
 更准确的理解是：  
@@ -443,7 +443,7 @@ tracker 的误差会累积：
 ---  
   
 ## 10. 数据部分：
-![SAM3 数据引擎](../md图片/sam3-data-engine.png)
+![SAM3 数据引擎](md图片/sam3-data-engine.png)
 ### 10.1 Figure 5 
 Figure 5 画的是：  
   
@@ -499,7 +499,7 @@ SAM 3 的数据引擎不是“越采越多”，而是：
 ---  
   
 ### 11.1 Presence head 的作用  
-![Presence Head 消融](../md图片/sam3-presence-head-ablation.png)
+![Presence Head 消融](md图片/sam3-presence-head-ablation.png)
 消融表明：  
   
 - presence head 带来的主要提升体现在 **IL_MCC**  
@@ -549,7 +549,7 @@ AI verifiers 不只是提速工具。消融表明：
 ---  
   
 ### 11.5 Figure 7 的关键结论  
-![Figure 7：PCS exemplar interaction vs PVS refinement](../md图片/sam3-figure7-pcs-vs-pvs.png)
+![Figure 7：PCS exemplar interaction vs PVS refinement](md图片/sam3-figure7-pcs-vs-pvs.png)
 这张图证明：  
   
 - exemplar-based PCS 更擅长“概念级修正”  
@@ -558,3 +558,4 @@ AI verifiers 不只是提速工具。消融表明：
   
 所以 image exemplar 不是“再加一种 prompt”，而是改变了交互范式。  
   
+
